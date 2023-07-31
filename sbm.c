@@ -54,7 +54,8 @@
  * 		the value the tag is changed to.
  * 		The new name must not begin with a number.
  * 	sbm tag remove <tag-ID> OR <tag-name>
- * 	sbm tag list all
+ * 	sbm tag list <term>
+ * 		<term> pertains the title. "all" can be used to list every entry.
  *
  * How do I compile and install this program?
  * 	Firstly, the dependencies must be installed: libcurl and json.h.
@@ -66,6 +67,10 @@
  * What problems does this software have?
  * 	1. Memory is not freed before calling exit(...) in most cases.
  * 	2. Multiple downloads (read GetWebpage()'s "NOTE:" comment).
+ * 	3. Downloads sometime hang (you can manually set the title with -t to 
+ * 	   manually get around this issue).
+ * 	3. Sometimes attempting to add URLs which are not surrounded with 
+ * 	   quotation marks will cause an issue with input parsing.
  * 
  *****************************************************************************/
 
@@ -195,8 +200,9 @@ static char* stristr(const char* a, const char* b);
 static int   stricmp(const char* a, const char* b);
 static char* strcpyt(char* d, char* s, unsigned int m, int l);
 
-static void PrintWithTagIDs(unsigned int* tagIds, unsigned int tc,
-                           Row* r, unsigned int rc);
+static void PrintWithTagIDs(unsigned int* tagIDs, unsigned int tc,
+                           Row* r, unsigned int rc,
+                           Tags tg);
 static void PrintRow(Row r, Tags tg);
 
 static char*        GetTagName(Tags t, unsigned int id);
@@ -285,7 +291,7 @@ ParseEntryInput(char* args[], int argc)
 			if (stricmp(args[1], "-tg") == 0) {
 				result.word_buffers[WI_TAG] = args[2];
 			} else {
-				printf("Invalid input");
+				printf("Invalid input\n");
 				exit(-1);
 			}
 		} else {
@@ -607,7 +613,7 @@ WriteJSON(Core* c)
 		curr = &c->table.rows[i];
 		if (curr->id == 0) continue;
 		
-		if (curr->url.long_url) {
+		if (curr->url.long_url == true) {
 			url = curr->url.address.l;
 		} else {
 			url = curr->url.address.s;
@@ -624,7 +630,8 @@ WriteJSON(Core* c)
 			}
 		}
 		
-		if (i != c->table.count - 1) {
+		if ((i != c->table.count - 1) &&
+		   !(i == c->table.count - 2 && c->table.rows[i + 1].id == 0)) {
 			strcat(&LARGE_BUFFER[strlen(LARGE_BUFFER)], "]],\n");
 		} else {
 			strcat(&LARGE_BUFFER[strlen(LARGE_BUFFER)], "]]\n");
@@ -667,8 +674,16 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 				Row* row;
 				
 				row = &io_c->table.rows[io_c->table.count];
+				memset(row, 0, sizeof(Row));
 				row->id = io_c->table.next_UID++;
-				strcpy(row->url.address.s, ia->word_buffers[WI_MOD]);
+				if (strlen(ia->word_buffers[WI_MOD]) >= S_ADDR_S) {
+					row->url.address.l = malloc(strlen(ia->word_buffers[WI_MOD]));
+					memset(row->url.address.l, 0, strlen(ia->word_buffers[WI_MOD]));
+					strcpy(row->url.address.s, ia->word_buffers[WI_MOD]);
+					row->url.long_url = true;
+				} else {
+					strcpy(row->url.address.s, ia->word_buffers[WI_MOD]);
+				}
 				if (ia->word_buffers[WI_TITLE] != NULL) {
 					strcpyt(row->title, ia->word_buffers[WI_TITLE], TITLE_S,
 					        -1);
@@ -814,7 +829,6 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 				scanf("%c", &confirmation);
 				if ((confirmation == 'y') || (confirmation == 'Y')) {
 					io_c->table.rows[index].id = 0;
-					io_c->table.count--;
 				} else {
 					exit(0);
 				}
@@ -871,7 +885,9 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 							}
 							curr = strtok(0, " ");
 						}
-						PrintWithTagIDs(tmp, freq, io_c->table.rows, io_c->table.count);
+						PrintWithTagIDs(tmp, freq,
+						                io_c->table.rows, io_c->table.count,
+						                io_c->tags);
 						free(tmp);
 					/* (Single Value) */
 					} else {
@@ -889,7 +905,9 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 						}
 						{
 							unsigned int tmp[1] = { id };
-							PrintWithTagIDs(tmp, 1, io_c->table.rows, io_c->table.count);
+							PrintWithTagIDs(tmp, 1,
+							                io_c->table.rows, io_c->table.count,
+							                io_c->tags);
 						}
 					}
 				}
@@ -919,8 +937,8 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 					exit(-1);
 				}
 				
-				len = Min(9 + strlen(url), 9 + S_ADDR_S - 1);
-				sprintf(buffer, "xdg-open %s", url);
+				len = Min(11 + strlen(url), 11 + S_ADDR_S - 1);
+				sprintf(buffer, "xdg-open %s &", url);
 				buffer[len] = 0;
 				result = system(buffer);
 				if (result != 0) {
@@ -928,6 +946,7 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 					exit(-1);
 				}
 			}
+			
 			break;
 		case IM_TAG_ADD:
 			{
@@ -946,11 +965,11 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 		case IM_TAG_ADD_TO_ENTRY:
 			{
 				unsigned int i;
-				unsigned int urlId,    tagIndex;
+				unsigned int urlID,    tagIndex;
 				         int urlIndex, freeTagIndex;
 				
 				if (isdigit(ia->word_buffers[WI_MOD][0])) {
-					urlId = atoi(ia->word_buffers[WI_MOD]);
+					urlID = atoi(ia->word_buffers[WI_MOD]);
 				} else {
 					printf("arg 1 must be an URL id.\n");
 					exit(-1);
@@ -963,13 +982,13 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 				
 				{
 					for (i = 0, urlIndex = -1; i < io_c->table.count; ++i) {
-						if (io_c->table.rows[i].id == urlId) {
+						if (io_c->table.rows[i].id == urlID) {
 							urlIndex = i;
 							break;
 						}
 					}
 					if (urlIndex == -1) {
-						printf("Could not find url with ID of %d\n", urlId);
+						printf("Could not find url with ID of %d\n", urlID);
 						exit(-1);
 					}
 				}
@@ -1029,7 +1048,8 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 				if ((confirmation == 'y') || (confirmation == 'Y')) {
 					for (i = 0; i < io_c->table.count; ++i) {
 						for (j = 0; j < ROW_TAG_C; ++j) {
-							if (io_c->table.rows[i].tag_ids[j] == io_c->tags.tags[index].id) {
+							if (io_c->table.rows[i].tag_ids[j] ==
+							    io_c->tags.tags[index].id) {
 								io_c->table.rows[i].tag_ids[j] = 0;
 								GetCurrentDateTime(&io_c->table.rows[i].datetime);
 							}
@@ -1045,17 +1065,26 @@ ProcessCommand(Core* io_c, InputArgs* ia)
 			{
 				unsigned int i;
 				
-				if (stricmp(ia->word_buffers[WI_MOD], "all") != 0) {
-					printf("Only \"all\" can be used to list tags\n");
-					exit(-1);
-				}
-				
-				for (i = 0; i < io_c->tags.count; ++i) {
-					if (io_c->tags.tags[i].id == 0) {
-						continue;
+				if (stricmp(ia->word_buffers[WI_MOD], "all") == 0) {
+					for (i = 0; i < io_c->tags.count; ++i) {
+						if (io_c->tags.tags[i].id == 0) continue;
+						printf("%d] %s\n",
+						       io_c->tags.tags[i].id, io_c->tags.tags[i].name);
 					}
-					printf("%d] %s\n",
-					       io_c->tags.tags[i].id, io_c->tags.tags[i].name);
+				} else {
+					int found = false;
+					for (i = 0; i < io_c->tags.count; ++i) {
+						if (io_c->tags.tags[i].id == 0) continue;
+						if (stristr(io_c->tags.tags[i].name, ia->word_buffers[WI_MOD]) !=
+						    NULL) {
+							printf("%d] %s\n",
+							       io_c->tags.tags[i].id, io_c->tags.tags[i].name);
+							found = true;
+						}
+					}
+					if (found == false) {
+						printf("No tags found.\n");
+					}
 				}
 			}
 			break;
@@ -1128,15 +1157,13 @@ strcpyt(char* d, char* s, unsigned int m, int l)
 	}
 	
 	strncpy(d, s, l);
-	if ((l >= m) && (l > 4)) {
+	if ((l + 1 >= m) && (l > 4)) {
 		l = m - 4;
 		for (i = l; i < l + 3; ++i) {
 			d[i] = '.';
 		}
-		/* TODO: test */
 		d[m - 1] = '\0';
 	} else {
-		/* TODO: test */
 		d[l] = '\0';
 	}
 	
@@ -1144,7 +1171,7 @@ strcpyt(char* d, char* s, unsigned int m, int l)
 }
 
 static int
-RowHasTagId(Row r, unsigned int id)
+RowHasTagID(Row r, unsigned int id)
 {
 	unsigned int i;
 	for (i = 0; i < ROW_TAG_C; ++i) {
@@ -1157,20 +1184,15 @@ RowHasTagId(Row r, unsigned int id)
 }
 
 static void
-PrintWithTagIDs(unsigned int* tagIds, unsigned int tc,
-               Row* r, unsigned int rc)
+PrintWithTagIDs(unsigned int* tagIDs, unsigned int tc,
+               Row* r, unsigned int rc,
+               Tags tg)
 {
 	unsigned int i, j;
 	for (i = 0; i < rc; ++i) {
 		for (j = 0; j < tc; ++j) {
-			if (RowHasTagId(r[i], tagIds[j]) == true) {
-				if (r[i].url.long_url == true) {
-					printf("%d. %s\n\t > %s\n",
-					       i, r[i].title, r[i].url.address.l);
-				} else {
-					printf("%d. %s\n\t > %s\n",
-					       i, r[i].title, r[i].url.address.s);
-				}
+			if (RowHasTagID(r[i], tagIDs[j]) == true) {
+				PrintRow(r[i], tg);
 			}
 		}
 	}
@@ -1180,7 +1202,7 @@ static char*
 GetTagName(Tags t, unsigned int id)
 {
 	unsigned int i;
-	for (i = 0; i < ROW_TAG_C; ++i) {
+	for (i = 0; i < t.count; ++i) {
 		if (t.tags[i].id == id) {
 			return t.tags[i].name;
 		}
@@ -1193,7 +1215,7 @@ static unsigned int
 GetTagID(Tags t, char* s)
 {
 	unsigned int i;
-	for (i = 0; i < ROW_TAG_C; ++i) {
+	for (i = 0; i < t.count; ++i) {
 		if (strcmp(t.tags[i].name, s) == 0) {
 			return t.tags[i].id;
 		}
@@ -1207,14 +1229,18 @@ PrintRow(Row r, Tags tg)
 {
 	unsigned int i, hasTags;
 	if (r.url.long_url == true) { 
-		printf("%3d. %s\n\t > %s\n",
+		printf("%d. %s\n\t > %s\n",
 		       r.id, r.title, r.url.address.l);
 	} else {
-		printf("%3d. %s\n\t > %s\n",
+		printf("%d. %s\n\t > %s\n",
 		       r.id, r.title, r.url.address.s);
 	}
 	
-	for (i = 0, hasTags = false; i < ROW_TAG_C; ++i) {
+	if (strlen(r.comment) > 0) {
+		printf("\t + '%s'\n", r.comment);
+	}
+	
+	for (i = 0, hasTags = false; i < tg.count; ++i) {
 		if (r.tag_ids[i] == 0) continue;
 		hasTags = true;
 		break;
@@ -1433,20 +1459,20 @@ static void
 UpdateRowTags(Core* io_c, unsigned int rowIndex, InputArgs* ia)
 {
 	char* tagInput;
-	int tagId, tagIndexInRow;
+	int tagID, tagIndexInRow;
 	
 	tagInput = ia->word_buffers[WI_TAG];
 	{
 		if (isdigit(tagInput[0])) {
-			tagId = atoi(tagInput);
-			if (tagId < 1) {
+			tagID = atoi(tagInput);
+			if (tagID < 1) {
 				printf("Invalid tag ID (%s)\n", tagInput);
 			}
 		} else {
 			int index;
 			ValidateTagName(ia->word_buffers, WI_TAG);
 			index = GetInputTagIndex(io_c, ia->word_buffers, WI_TAG);
-			tagId = io_c->tags.tags[index].id;
+			tagID = io_c->tags.tags[index].id;
 		}
 	}
 	{
@@ -1457,17 +1483,17 @@ UpdateRowTags(Core* io_c, unsigned int rowIndex, InputArgs* ia)
 			    tagIndexInRow == -1) {
 				full = false;
 				tagIndexInRow = i;
-			} else if (io_c->table.rows[rowIndex].tag_ids[i] == tagId) {
+			} else if (io_c->table.rows[rowIndex].tag_ids[i] == tagID) {
 				char confirmation;
 				
 				full = false;
 				tagIndexInRow = i;
 				printf("Are you sure you want to remove tag %s from row " \
-				       "%d? [Y/n] \n", GetTagName(io_c->tags, tagId),  tagId);
+				       "%d? [Y/n] \n", GetTagName(io_c->tags, tagID),  tagID);
 				
 				scanf("%c", &confirmation);
 				if ((confirmation == 'y') || (confirmation == 'Y')) {
-					tagId = 0;
+					tagID = 0;
 				} else {
 					exit(0);
 				}
@@ -1481,7 +1507,7 @@ UpdateRowTags(Core* io_c, unsigned int rowIndex, InputArgs* ia)
 		}
 	}
 	
-	io_c->table.rows[rowIndex].tag_ids[tagIndexInRow] = tagId;
+	io_c->table.rows[rowIndex].tag_ids[tagIndexInRow] = tagID;
 }
 
 static void
