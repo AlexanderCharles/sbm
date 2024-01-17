@@ -1,7 +1,6 @@
 
 /******************************************************************************
  * 
- * portfolio/BugTracker
  * Copyright (C) 2023 github.com/AlexanderCharles
  * 
  * This program is free software: you can redistribute it and/or modify it
